@@ -769,6 +769,7 @@ namespace HaRepacker.GUI.Panels
                 }
 
                 WzPngProperty pngProperty = new();
+                var oriProperty = canvas.PngProperty;
                 pngProperty.PNG = bmp;
 
                 WzCanvasProperty canvas = new(proposedName);
@@ -1958,7 +1959,36 @@ namespace HaRepacker.GUI.Panels
                     childInlinkNode.DeleteWzNode(); // Delete '_inlink' node
                 }
 
-                selectedWzCanvas.PngProperty.PNG = bmp;
+                Bitmap toAssign = bmp;
+                try
+                {
+                    switch (pngProp.Format)
+                    {
+                        case WzPngFormat.Format1: // BGRA4444 per MapleLib decode path
+                            toAssign = QuantizeTo4444(bmp, isBgraOrder: true);
+                            break;
+                        case WzPngFormat.Format257: // ARGB1555 (Format257 used in decode path for 1555)
+                            toAssign = QuantizeTo1555(bmp);
+                            break;
+                        case WzPngFormat.Format513: // BGR565
+                        case WzPngFormat.Format517:
+                            toAssign = QuantizeTo565(bmp);
+                            break;
+                        default:
+                            // For formats that need block compression (DXT3/DXT5/BC7) or standard RGBA32,
+                            // do not quantize here — let MapleLib's PngUtility detect/encode appropriately.
+                            toAssign = bmp;
+                            break;
+                    }
+                }
+                catch
+                {
+                    toAssign = bmp; // fallback to original bitmap on any quantization error
+                }
+    
+                // Assign into the WzPngProperty using its public PNG setter (this will trigger MapleLib's CompressPng)
+                Bitmap formattedBitmap = new Bitmap(toAssign);
+                selectedWzCanvas.PngProperty.PNG = formattedBitmap;
 
                 canvasPropBox.SetIsLoading(true);
                 try {
@@ -2948,6 +2978,165 @@ namespace HaRepacker.GUI.Panels
         private void findBox_TextChanged(object sender, TextChangedEventArgs e)
         {
             searchidx = 0;
+        }
+
+        private static Bitmap QuantizeTo4444(Bitmap src, bool isBgraOrder)
+        {
+            int w = src.Width, h = src.Height;
+            Bitmap dst = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+
+            BitmapData srcData = src.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            BitmapData dstData = dst.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                int srcStride = Math.Abs(srcData.Stride);
+                int dstStride = Math.Abs(dstData.Stride);
+                byte[] srcRow = new byte[srcStride];
+                byte[] dstRow = new byte[dstStride];
+                for (int y = 0; y < h; y++)
+                {
+                    Marshal.Copy(IntPtr.Add(srcData.Scan0, y * srcData.Stride), srcRow, 0, srcStride);
+                    int idx = 0;
+                    for (int x = 0; x < w; x++)
+                    {
+                        byte b = srcRow[x * 4 + 0];
+                        byte g = srcRow[x * 4 + 1];
+                        byte r = srcRow[x * 4 + 2];
+                        byte a = srcRow[x * 4 + 3];
+
+                        byte c1, c2, c3, c4;
+                        if (isBgraOrder)
+                        {
+                            c1 = (byte)((b >> 4) & 0x0F);
+                            c2 = (byte)((g >> 4) & 0x0F);
+                            c3 = (byte)((r >> 4) & 0x0F);
+                            c4 = (byte)((a >> 4) & 0x0F);
+                        }
+                        else
+                        {
+                            c1 = (byte)((r >> 4) & 0x0F);
+                            c2 = (byte)((g >> 4) & 0x0F);
+                            c3 = (byte)((b >> 4) & 0x0F);
+                            c4 = (byte)((a >> 4) & 0x0F);
+                        }
+
+                        byte e1 = (byte)((c1 << 4) | c1);
+                        byte e2 = (byte)((c2 << 4) | c2);
+                        byte e3 = (byte)((c3 << 4) | c3);
+                        byte e4 = (byte)((c4 << 4) | c4);
+
+                        // dst order must remain BGRA for Format32bppArgb
+                        dstRow[idx++] = isBgraOrder ? e1 : e3; // B
+                        dstRow[idx++] = isBgraOrder ? e2 : e2; // G
+                        dstRow[idx++] = isBgraOrder ? e3 : e1; // R
+                        dstRow[idx++] = e4; // A
+                    }
+                    Marshal.Copy(dstRow, 0, IntPtr.Add(dstData.Scan0, y * dstData.Stride), dstStride);
+                }
+            }
+            finally
+            {
+                src.UnlockBits(srcData);
+                dst.UnlockBits(dstData);
+            }
+            return dst;
+        }
+
+        private static Bitmap QuantizeTo1555(Bitmap src)
+        {
+            int w = src.Width, h = src.Height;
+            Bitmap dst = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+
+            BitmapData srcData = src.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            BitmapData dstData = dst.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                int srcStride = Math.Abs(srcData.Stride);
+                int dstStride = Math.Abs(dstData.Stride);
+                byte[] srcRow = new byte[srcStride];
+                byte[] dstRow = new byte[dstStride];
+                for (int y = 0; y < h; y++)
+                {
+                    Marshal.Copy(IntPtr.Add(srcData.Scan0, y * srcData.Stride), srcRow, 0, srcStride);
+                    int idx = 0;
+                    for (int x = 0; x < w; x++)
+                    {
+                        byte b = srcRow[x * 4 + 0];
+                        byte g = srcRow[x * 4 + 1];
+                        byte r = srcRow[x * 4 + 2];
+                        byte a = srcRow[x * 4 + 3];
+
+                        int a1 = (a > 127) ? 1 : 0;
+                        int r5 = r >> 3;
+                        int g5 = g >> 3;
+                        int b5 = b >> 3;
+
+                        byte r8 = (byte)((r5 << 3) | (r5 >> 2));
+                        byte g8 = (byte)((g5 << 3) | (g5 >> 2));
+                        byte b8 = (byte)((b5 << 3) | (b5 >> 2));
+                        byte a8 = (byte)(a1 == 1 ? 255 : 0);
+
+                        dstRow[idx++] = b8;
+                        dstRow[idx++] = g8;
+                        dstRow[idx++] = r8;
+                        dstRow[idx++] = a8;
+                    }
+                    Marshal.Copy(dstRow, 0, IntPtr.Add(dstData.Scan0, y * dstData.Stride), dstStride);
+                }
+            }
+            finally
+            {
+                src.UnlockBits(srcData);
+                dst.UnlockBits(dstData);
+            }
+            return dst;
+        }
+
+        private static Bitmap QuantizeTo565(Bitmap src)
+        {
+            int w = src.Width, h = src.Height;
+            Bitmap dst = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+
+            BitmapData srcData = src.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            BitmapData dstData = dst.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                int srcStride = Math.Abs(srcData.Stride);
+                int dstStride = Math.Abs(dstData.Stride);
+                byte[] srcRow = new byte[srcStride];
+                byte[] dstRow = new byte[dstStride];
+                for (int y = 0; y < h; y++)
+                {
+                    Marshal.Copy(IntPtr.Add(srcData.Scan0, y * srcData.Stride), srcRow, 0, srcStride);
+                    int idx = 0;
+                    for (int x = 0; x < w; x++)
+                    {
+                        byte b = srcRow[x * 4 + 0];
+                        byte g = srcRow[x * 4 + 1];
+                        byte r = srcRow[x * 4 + 2];
+
+                        int r5 = r >> 3;
+                        int g6 = g >> 2;
+                        int b5 = b >> 3;
+
+                        byte r8 = (byte)((r5 << 3) | (r5 >> 2));
+                        byte g8 = (byte)((g6 << 2) | (g6 >> 4));
+                        byte b8 = (byte)((b5 << 3) | (b5 >> 2));
+
+                        dstRow[idx++] = b8;
+                        dstRow[idx++] = g8;
+                        dstRow[idx++] = r8;
+                        dstRow[idx++] = 255; // opaque
+                    }
+                    Marshal.Copy(dstRow, 0, IntPtr.Add(dstData.Scan0, y * dstData.Stride), dstStride);
+                }
+            }
+            finally
+            {
+                src.UnlockBits(srcData);
+                dst.UnlockBits(dstData);
+            }
+            return dst;
         }
         #endregion
     }
